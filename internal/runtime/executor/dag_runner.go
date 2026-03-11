@@ -50,8 +50,9 @@ type SubDAGExecutor struct {
 	// Process tracking for ALL executions
 	mu              sync.Mutex
 	cmds            map[string]*osexec.Cmd // runID -> cmd for local processes
-	distributedRuns map[string]bool        // runID -> true for distributed runs
-	dagCtx          exec.Context           // for DB access when cancelling distributed runs
+	embeddedCancels map[string]context.CancelFunc
+	distributedRuns map[string]bool // runID -> true for distributed runs
+	dagCtx          exec.Context    // for DB access when cancelling distributed runs
 
 	// killed should be closed when Kill is called
 	killed     chan struct{}
@@ -90,6 +91,7 @@ func NewSubDAGExecutor(ctx context.Context, childName string) (*SubDAGExecutor, 
 				tempFile:        tempFile,
 				coordinatorCli:  rCtx.CoordinatorCli,
 				cmds:            make(map[string]*osexec.Cmd),
+				embeddedCancels: make(map[string]context.CancelFunc),
 				distributedRuns: make(map[string]bool),
 				dagCtx:          rCtx,
 				killed:          make(chan struct{}),
@@ -107,6 +109,7 @@ func NewSubDAGExecutor(ctx context.Context, childName string) (*SubDAGExecutor, 
 		DAG:             dag,
 		coordinatorCli:  rCtx.CoordinatorCli,
 		cmds:            make(map[string]*osexec.Cmd),
+		embeddedCancels: make(map[string]context.CancelFunc),
 		distributedRuns: make(map[string]bool),
 		dagCtx:          rCtx,
 		killed:          make(chan struct{}),
@@ -249,6 +252,10 @@ func (e *SubDAGExecutor) Execute(ctx context.Context, runParams RunParams, workD
 		return e.dispatch(ctx, runParams)
 	}
 
+	if rCtx.SubDAGRunner != nil {
+		return e.executeInProcess(ctx, runParams, workDir, rCtx.SubDAGRunner)
+	}
+
 	// Handle local execution
 	cmd, err := e.buildCommand(ctx, runParams, workDir)
 	if err != nil {
@@ -312,6 +319,51 @@ func (e *SubDAGExecutor) Execute(ctx context.Context, runParams RunParams, workD
 	}
 
 	return result, waitErr
+}
+
+func (e *SubDAGExecutor) executeInProcess(
+	ctx context.Context,
+	runParams RunParams,
+	workDir string,
+	runner exec.SubDAGRunner,
+) (*exec.RunStatus, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+
+	e.mu.Lock()
+	if e.embeddedCancels == nil {
+		e.embeddedCancels = make(map[string]context.CancelFunc)
+	}
+	e.embeddedCancels[runParams.RunID] = cancel
+	e.mu.Unlock()
+
+	defer func() {
+		cancel()
+		e.mu.Lock()
+		delete(e.embeddedCancels, runParams.RunID)
+		e.mu.Unlock()
+	}()
+
+	rCtx := exec.GetContext(ctx)
+	result, err := runner.RunSubDAG(runCtx, exec.SubDAGRunRequest{
+		DAG:          e.DAG,
+		DAGRunID:     runParams.RunID,
+		RootDAGRun:   rCtx.RootDAGRun,
+		ParentDAGRun: rCtx.DAGRunRef(),
+		Params:       subDAGParams(runParams.Params),
+		WorkDir:      workDir,
+		TriggerType:  core.TriggerTypeSubDAG,
+	})
+	if err != nil {
+		return result, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("sub dag-run %q returned no status", runParams.RunID)
+	}
+	if result.Status.IsSuccess() {
+		logger.Info(ctx, "Sub DAG completed successfully in-process")
+		return result, nil
+	}
+	return result, nil
 }
 
 // dispatch runs the sub DAG via coordinator and returns the result.
@@ -608,6 +660,17 @@ func (e *SubDAGExecutor) Kill(sig os.Signal) error {
 		}
 	}
 
+	// Cancel in-process embedded runs
+	for runID, cancelRun := range e.embeddedCancels {
+		if cancelRun != nil {
+			cancelRun()
+			logger.Info(ctx, "Requested embedded sub DAG cancellation",
+				tag.RunID(runID),
+				tag.DAG(e.DAG.Name),
+			)
+		}
+	}
+
 	// Kill local processes
 	for runID, cmd := range e.cmds {
 		if cmd != nil && cmd.Process != nil {
@@ -632,6 +695,14 @@ func (e *SubDAGExecutor) Kill(sig os.Signal) error {
 	})
 
 	return errors.Join(errs...)
+}
+
+func subDAGParams(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return []string{raw}
 }
 
 // executablePath returns the path to the dagu executable.

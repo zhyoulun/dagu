@@ -181,6 +181,9 @@ type Agent struct {
 	// workDir is the per-run work directory (for DAG_RUN_WORK_DIR).
 	workDir string
 
+	// subDAGRunner optionally executes child DAG-runs in-process.
+	subDAGRunner exec.SubDAGRunner
+
 	// Evaluated configs - these are expanded at runtime and stored separately
 	// to avoid mutating the original DAG struct.
 	evaluatedSMTP          *core.SMTPConfig
@@ -244,6 +247,8 @@ type Options struct {
 	TriggerType core.TriggerType
 	// DefaultExecMode is the server-level default execution mode.
 	DefaultExecMode config.ExecutionMode
+	// SubDAGRunner optionally executes child DAG-runs in-process.
+	SubDAGRunner exec.SubDAGRunner
 	// AgentConfigStore is the agent config store for agent step execution.
 	AgentConfigStore agentpkg.ConfigStore
 	// AgentModelStore is the agent model store for agent step execution.
@@ -290,6 +295,7 @@ func New(
 		attemptID:               opts.AttemptID,
 		triggerType:             opts.TriggerType,
 		defaultExecMode:         opts.DefaultExecMode,
+		subDAGRunner:            opts.SubDAGRunner,
 		agentConfigStore:        opts.AgentConfigStore,
 		agentModelStore:         opts.AgentModelStore,
 		agentMemoryStore:        opts.AgentMemoryStore,
@@ -451,6 +457,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		runtime.WithRootDAGRun(a.rootDAGRun),
 		runtime.WithParams(a.dag.Params),
 		runtime.WithCoordinator(coordinatorCli),
+		runtime.WithSubDAGRunner(a.subDAGRunner),
 		runtime.WithSecrets(secretEnvs),
 		runtime.WithDefaultExecMode(a.defaultExecMode),
 	}

@@ -31,6 +31,7 @@ type Context struct {
 	LogEncodingCharset string               // Character encoding for log files (e.g., "utf-8", "shift_jis", "euc-jp")
 	LogWriterFactory   LogWriterFactory     // For remote log streaming (nil = use local files)
 	DefaultExecMode    config.ExecutionMode // Server-level default execution mode (local or distributed)
+	SubDAGRunner       SubDAGRunner         // Optional in-process sub-DAG runner used by embedded integrations
 }
 
 // LogWriterFactory creates log writers for step stdout/stderr.
@@ -138,12 +139,29 @@ type Dispatcher interface {
 	RequestCancel(ctx context.Context, dagName, dagRunID string, rootRef *DAGRunRef) error
 }
 
+// SubDAGRunRequest captures everything needed to execute a child DAG-run in-process.
+type SubDAGRunRequest struct {
+	DAG          *core.DAG
+	DAGRunID     string
+	RootDAGRun   DAGRunRef
+	ParentDAGRun DAGRunRef
+	Params       []string
+	WorkDir      string
+	TriggerType  core.TriggerType
+}
+
+// SubDAGRunner executes a child DAG-run in-process instead of spawning a subprocess.
+type SubDAGRunner interface {
+	RunSubDAG(ctx context.Context, req SubDAGRunRequest) (*RunStatus, error)
+}
+
 // contextOptions holds optional configuration for NewContext.
 type contextOptions struct {
 	db                 Database
 	rootDAGRun         DAGRunRef
 	params             []string
 	coordinator        Dispatcher
+	subDAGRunner       SubDAGRunner
 	secretEnvs         []string
 	logEncodingCharset string
 	logWriterFactory   LogWriterFactory
@@ -179,6 +197,13 @@ func WithParams(params []string) ContextOption {
 func WithCoordinator(cli Dispatcher) ContextOption {
 	return func(o *contextOptions) {
 		o.coordinator = cli
+	}
+}
+
+// WithSubDAGRunner sets an optional in-process sub-DAG runner.
+func WithSubDAGRunner(runner SubDAGRunner) ContextOption {
+	return func(o *contextOptions) {
+		o.subDAGRunner = runner
 	}
 }
 
@@ -277,6 +302,7 @@ func NewContext(
 		DAGRunID:           dagRunID,
 		BaseEnv:            config.GetBaseEnv(ctx),
 		CoordinatorCli:     options.coordinator,
+		SubDAGRunner:       options.subDAGRunner,
 		Shell:              dag.Shell,
 		LogEncodingCharset: options.logEncodingCharset,
 		LogWriterFactory:   options.logWriterFactory,

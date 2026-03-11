@@ -37,6 +37,8 @@ var (
 	WithParams = exec.WithParams
 	// WithCoordinator sets the coordinator dispatcher for distributed execution.
 	WithCoordinator = exec.WithCoordinator
+	// WithSubDAGRunner sets an optional in-process sub-DAG runner.
+	WithSubDAGRunner = exec.WithSubDAGRunner
 	// WithSecrets sets secret environment variables.
 	WithSecrets = exec.WithSecrets
 	// WithLogEncoding sets the log file character encoding.

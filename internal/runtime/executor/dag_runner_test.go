@@ -262,6 +262,50 @@ func TestBuildCommand_NoRootDAGRun(t *testing.T) {
 	assert.Contains(t, err.Error(), "root DAG run ID is not set")
 }
 
+func TestExecute_UsesEmbeddedRunner(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mockDB := new(mockDatabase)
+	mockRunner := &mockSubDAGRunner{
+		result: &exec1.RunStatus{
+			Name:     "test-child",
+			DAGRunID: "child-789",
+			Params:   "KEY=value",
+			Outputs:  map[string]string{"RESULT": "ok"},
+			Status:   core.Succeeded,
+		},
+	}
+	dagCtx := exec1.Context{
+		DAG:          &core.DAG{Name: "parent"},
+		DB:           mockDB,
+		RootDAGRun:   exec1.NewDAGRunRef("parent", "root-123"),
+		DAGRunID:     "parent-456",
+		SubDAGRunner: mockRunner,
+	}
+	ctx = exec1.WithContext(ctx, dagCtx)
+
+	executor := &SubDAGExecutor{
+		DAG:    &core.DAG{Name: "test-child", Location: "/path/to/test.yaml"},
+		killed: make(chan struct{}),
+	}
+
+	result, err := executor.Execute(ctx, RunParams{
+		RunID:  "child-789",
+		Params: "KEY=value",
+	}, "/work/dir")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, mockRunner.called)
+
+	assert.Equal(t, "child-789", result.DAGRunID)
+	assert.Equal(t, exec1.NewDAGRunRef("parent", "root-123"), mockRunner.request.RootDAGRun)
+	assert.Equal(t, exec1.NewDAGRunRef("parent", "parent-456"), mockRunner.request.ParentDAGRun)
+	assert.Equal(t, []string{"KEY=value"}, mockRunner.request.Params)
+	assert.Equal(t, "/work/dir", mockRunner.request.WorkDir)
+	assert.Equal(t, core.TriggerTypeSubDAG, mockRunner.request.TriggerType)
+}
+
 func TestCleanup_LocalDAG(t *testing.T) {
 	t.Parallel()
 
@@ -496,6 +540,19 @@ var _ exec1.Database = (*mockDatabase)(nil)
 // mockDatabase is a mock implementation of core.Database
 type mockDatabase struct {
 	mock.Mock
+}
+
+type mockSubDAGRunner struct {
+	called  bool
+	request exec1.SubDAGRunRequest
+	result  *exec1.RunStatus
+	err     error
+}
+
+func (m *mockSubDAGRunner) RunSubDAG(_ context.Context, req exec1.SubDAGRunRequest) (*exec1.RunStatus, error) {
+	m.called = true
+	m.request = req
+	return m.result, m.err
 }
 
 func (m *mockDatabase) GetDAG(ctx context.Context, name string) (*core.DAG, error) {
